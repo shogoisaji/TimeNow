@@ -7,30 +7,31 @@ use unicode_width::UnicodeWidthChar;
 /// 1ピクセルあたりのターミナル列数(セルの縦横比≈2:1 を補正するため2列で1ピクセル)。
 pub const PIXEL_COLS: usize = 2;
 
-/// ON/OFF ピクセル文字のペア(シンボルセット)。
+/// シンボルレンダリングモード。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CharSet {
-    pub on: char,
-    pub off: char,
+pub enum CharSet {
+    /// 塗りつぶしモード: ON ピクセルに `on`、OFF ピクセルに `off` を配置。
+    Fill { on: char, off: char },
+    /// ドットマトリクスモード: ON ピクセルに `●`、OFF ピクセルに空白を配置。
+    /// 巨大表示すると丸いピクセルが並ぶLED掲示板風の見た目になる。
+    Dots,
 }
 
 impl CharSet {
     /// 従来のデフォルト: `#` と空白。
-    pub const DEFAULT: CharSet = CharSet { on: '#', off: ' ' };
+    pub const DEFAULT: CharSet = CharSet::Fill { on: '#', off: ' ' };
 
     /// 定義済みシンボルセットを順番に返す(cycling用)。
-    /// すべて半角文字(セル幅1)で統一 — 全角文字が混じると列幅が崩れて左寄りになるため。
     pub fn all() -> &'static [CharSet] {
         &[
-            CharSet { on: '#', off: ' ' },
-            CharSet {
+            CharSet::Fill { on: '#', off: ' ' },
+            CharSet::Fill {
                 on: '█', off: ' '
             },
-            CharSet {
+            CharSet::Fill {
                 on: '▓', off: '░'
             },
-            CharSet { on: '*', off: '.' },
-            CharSet { on: '+', off: '-' },
+            CharSet::Dots,
         ]
     }
 
@@ -39,6 +40,27 @@ impl CharSet {
         let all = Self::all();
         let idx = all.iter().position(|&s| s == self).unwrap_or(0);
         all[(idx + 1) % all.len()]
+    }
+
+    /// Fill モードの on 文字を返す(Dots の場合は ' ')。
+    pub fn on_char(self) -> char {
+        match self {
+            CharSet::Fill { on, .. } => on,
+            CharSet::Dots => ' ',
+        }
+    }
+
+    /// Fill モードの off 文字を返す(Dots の場合は ' ')。
+    pub fn off_char(self) -> char {
+        match self {
+            CharSet::Fill { off, .. } => off,
+            CharSet::Dots => ' ',
+        }
+    }
+
+    /// Dots モードかどうか。
+    pub fn is_dots(self) -> bool {
+        matches!(self, CharSet::Dots)
     }
 }
 
@@ -59,7 +81,7 @@ impl Style {
     /// デフォルトスタイル(太いブロック体 + ブロック文字)。
     pub const DEFAULT: Style = Style {
         font: Font::Neo,
-        chars: CharSet {
+        chars: CharSet::Fill {
             on: '█', off: ' '
         },
     };
@@ -194,6 +216,7 @@ pub fn help_lines() -> Vec<&'static str> {
         "timenow controls",
         "",
         " p / s / c / b   cycle style",
+        " +/-  or  Cmd+/- change size",
         " o               open settings",
         " h / Esc         toggle help",
         " q / Enter       quit",
@@ -315,24 +338,34 @@ fn font_preview(font: Font) -> String {
 
 /// CharSet の表示名。
 pub fn charset_label(cs: CharSet) -> String {
-    let off_name = if cs.off == ' ' {
-        "space".to_string()
-    } else {
-        cs.off.to_string()
-    };
-    format!("{} / {}", cs.on, off_name)
+    match cs {
+        CharSet::Fill { on, off } => {
+            let off_name = if off == ' ' {
+                "space".to_string()
+            } else {
+                off.to_string()
+            };
+            format!("{} / {}", on, off_name)
+        }
+        CharSet::Dots => "Dots".to_string(),
+    }
 }
 
-/// CharSet のプレビュー: on文字5個 + off文字2個。
+/// CharSet のプレビュー。
 fn charset_preview(cs: CharSet) -> String {
-    let mut s = String::new();
-    for _ in 0..5 {
-        s.push(cs.on);
+    match cs {
+        CharSet::Fill { on, off } => {
+            let mut s = String::new();
+            for _ in 0..5 {
+                s.push(on);
+            }
+            for _ in 0..2 {
+                s.push(off);
+            }
+            s
+        }
+        CharSet::Dots => "●●●●●  ".to_string(),
     }
-    for _ in 0..2 {
-        s.push(cs.off);
-    }
-    s
 }
 
 /// Color の表示名。
@@ -818,6 +851,12 @@ pub fn compute_scale_for_style(cols: usize, rows: usize, style: &Style) -> usize
     }
 }
 
+/// 実際に描画に使う scale を解決する。
+/// 常に Auto: 端末サイズに収まる最大 scale。
+pub fn resolve_scale(cols: usize, rows: usize, style: &Style) -> usize {
+    compute_scale_for_style(cols, rows, style)
+}
+
 /// 1ピクセル分の文字を `target_cols` 列幅になるように繰り返し追加する。
 /// 半角文字(幅1)なら2個、全角文字(幅2)なら1個追加する。
 fn push_pixel(line: &mut String, ch: char, target_cols: usize) {
@@ -833,6 +872,11 @@ fn push_pixel(line: &mut String, ch: char, target_cols: usize) {
 /// `style` でフォントと ON/OFF 文字を切り替え。
 /// 文字の表示幅(unicode-width)を考慮し、1ピクセル = PIXEL_COLS列 になるよう調整。
 pub fn render(text: &str, colon_on: bool, scale: usize, style: &Style) -> Vec<String> {
+    let (on, off) = if style.chars.is_dots() {
+        ('●', ' ')
+    } else {
+        (style.chars.on_char(), style.chars.off_char())
+    };
     let chars: Vec<char> = text.chars().collect();
     let glyphs: Vec<&'static [&'static str]> = chars
         .iter()
@@ -851,19 +895,15 @@ pub fn render(text: &str, colon_on: bool, scale: usize, style: &Style) -> Vec<St
             for (gi, g) in glyphs.iter().enumerate() {
                 let row = g[py];
                 for px in 0..glyph_w {
-                    let on = row.as_bytes()[px] == b'#';
-                    let ch = if on { style.chars.on } else { style.chars.off };
+                    let is_on = row.as_bytes()[px] == b'#';
+                    let ch = if is_on { on } else { off };
                     // ':' のとき colon_on=false なら空白にする
-                    let draw = if is_colon[gi] && !colon_on {
-                        style.chars.off
-                    } else {
-                        ch
-                    };
+                    let draw = if is_colon[gi] && !colon_on { off } else { ch };
                     push_pixel(&mut line, draw, px_cols);
                 }
                 // ギャップ(最後のグリフの後には入れない)
                 if gi + 1 < glyphs.len() {
-                    push_pixel(&mut line, style.chars.off, gap_cols);
+                    push_pixel(&mut line, off, gap_cols);
                 }
             }
             lines.push(line);
@@ -917,6 +957,20 @@ mod tests {
         assert_eq!(compute_scale(0, 0), 1);
     }
 
+    // --- resolve_scale のテスト ---
+
+    #[test]
+    fn resolve_scale_matches_compute() {
+        let style = Style::DEFAULT;
+        let cols = rendered_cols_for_style(1, &style) * 3;
+        let rows = rendered_rows_for_style(1, &style) * 3;
+        assert_eq!(
+            resolve_scale(cols, rows, &style),
+            compute_scale_for_style(cols, rows, &style)
+        );
+        assert_eq!(resolve_scale(cols, rows, &style), 3);
+    }
+
     #[test]
     fn render_height_matches_scale() {
         let lines = render("12:34", true, 2, &Style::DEFAULT);
@@ -947,7 +1001,7 @@ mod tests {
         // ブロック要素(█)が全角扱いの端末でも、表示幅は rendered_cols に一致すべき
         let style = Style {
             font: Font::Block,
-            chars: CharSet {
+            chars: CharSet::Fill {
                 on: '█', off: ' '
             },
         };
@@ -966,7 +1020,7 @@ mod tests {
         // 全角文字(●, 幅2)を on にした場合、1ピクセル = 1個 で PIXEL_COLS(2)列を満たす
         let style = Style {
             font: Font::Block,
-            chars: CharSet {
+            chars: CharSet::Fill {
                 on: '●', off: ' '
             },
         };
@@ -982,7 +1036,7 @@ mod tests {
         // コロン行(行1)の中央付近に # がある
         let colon_row = &lines[1];
         assert!(
-            colon_row.contains(Style::DEFAULT.chars.on),
+            colon_row.contains(Style::DEFAULT.chars.on_char()),
             "colon on should have pixels: {colon_row}"
         );
     }
@@ -1014,11 +1068,11 @@ mod tests {
             let colon_off: String = off[r].chars().skip(start).take(end - start).collect();
             let colon_on: String = on[r].chars().skip(start).take(end - start).collect();
             assert!(
-                colon_on.contains(Style::DEFAULT.chars.on),
+                colon_on.contains(Style::DEFAULT.chars.on_char()),
                 "colon on row {r} should have pixels: {colon_on}"
             );
             assert!(
-                !colon_off.contains(Style::DEFAULT.chars.on),
+                !colon_off.contains(Style::DEFAULT.chars.on_char()),
                 "colon off row {r} should be blank: {colon_off}"
             );
         }
@@ -1034,7 +1088,7 @@ mod tests {
         // ギャップなし(グリフ1つだけ)なので行0の # は4つ連続
         let row0 = &lines[0];
         assert!(
-            row0.contains(&Style::DEFAULT.chars.on.to_string().repeat(4)),
+            row0.contains(&Style::DEFAULT.chars.on_char().to_string().repeat(4)),
             "scale2 should produce 4-wide pixel: {row0}"
         );
     }
@@ -1045,7 +1099,7 @@ mod tests {
     fn render_with_custom_on_char_uses_it() {
         let style = Style {
             font: Font::Block,
-            chars: CharSet {
+            chars: CharSet::Fill {
                 on: '█', off: ' '
             },
         };
@@ -1062,7 +1116,7 @@ mod tests {
     fn render_with_custom_off_char_uses_it() {
         let style = Style {
             font: Font::Block,
-            chars: CharSet { on: '#', off: '·' },
+            chars: CharSet::Fill { on: '#', off: '·' },
         };
         let lines = render("0", true, 1, &style);
         // 行0は "#####" なので off_char は出ないが、行1は "#   #" なので中央に off_char
@@ -1177,8 +1231,8 @@ mod tests {
     #[test]
     fn default_style_uses_neo_and_block_char() {
         assert_eq!(Style::DEFAULT.font, Font::Neo);
-        assert_eq!(Style::DEFAULT.chars.on, '█');
-        assert_eq!(Style::DEFAULT.chars.off, ' ');
+        assert_eq!(Style::DEFAULT.chars.on_char(), '█');
+        assert_eq!(Style::DEFAULT.chars.off_char(), ' ');
     }
 
     // --- ヘルプダイアログのテスト ---
@@ -1240,32 +1294,32 @@ mod tests {
 
     #[test]
     fn setting_items_count_is_total_options() {
-        // Date(2) + Font(4) + CharSet(5) + Color(9) + Color(9) = 29
+        // Date(2) + Font(4) + CharSet(4) + Color(9) + Color(9) = 28
         let items = setting_items(Style::DEFAULT, Theme::default(), DateDisplay::default());
-        assert_eq!(items.len(), 2 + 4 + 5 + 9 + 9);
+        assert_eq!(items.len(), 2 + 4 + 4 + 9 + 9);
     }
 
     #[test]
     fn setting_items_kinds_in_order() {
         let items = setting_items(Style::DEFAULT, Theme::default(), DateDisplay::default());
-        // Date x2, Pattern x4, Symbol x5, Foreground x9, Background x9
+        // Date x2, Pattern x4, Symbol x4, Foreground x9, Background x9
         assert_eq!(items[0].kind, SettingKind::Date);
         assert_eq!(items[1].kind, SettingKind::Date);
         assert_eq!(items[2].kind, SettingKind::Pattern);
         assert_eq!(items[5].kind, SettingKind::Pattern);
         assert_eq!(items[6].kind, SettingKind::Symbol);
-        assert_eq!(items[10].kind, SettingKind::Symbol);
-        assert_eq!(items[11].kind, SettingKind::Foreground);
-        assert_eq!(items[19].kind, SettingKind::Foreground);
-        assert_eq!(items[20].kind, SettingKind::Background);
-        assert_eq!(items[28].kind, SettingKind::Background);
+        assert_eq!(items[9].kind, SettingKind::Symbol);
+        assert_eq!(items[10].kind, SettingKind::Foreground);
+        assert_eq!(items[18].kind, SettingKind::Foreground);
+        assert_eq!(items[19].kind, SettingKind::Background);
+        assert_eq!(items[27].kind, SettingKind::Background);
     }
 
     #[test]
     fn setting_items_selected_matches_current() {
         let style = Style {
             font: Font::Outline,
-            chars: CharSet {
+            chars: CharSet::Fill {
                 on: '█', off: ' '
             },
         };
@@ -1341,7 +1395,7 @@ mod tests {
 
     #[test]
     fn charset_preview_uses_on_and_off_chars() {
-        let cs = CharSet {
+        let cs = CharSet::Fill {
             on: '▓', off: '░'
         };
         let p = charset_preview(cs);
@@ -1548,7 +1602,7 @@ mod tests {
     fn settings_layout_clamps_cursor() {
         let items = setting_items(Style::DEFAULT, Theme::default(), DateDisplay::default());
         let layout = settings_layout(&items, 999, 100);
-        // クランプされて最後の項目(Background White)がカーソル行になる
+        // クランプされて最後の項目(Background "White")がカーソル行になる
         let cursor_row = layout
             .rows
             .iter()
@@ -1556,7 +1610,7 @@ mod tests {
             .expect("cursor marker should appear");
         assert!(
             cursor_row.text.contains("White"),
-            "clamped cursor should be White: {}",
+            "clamped cursor should be last Background item: {}",
             cursor_row.text
         );
     }

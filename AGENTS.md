@@ -9,16 +9,19 @@
 | キー | 機能 |
 |------|------|
 | `p` | パターン(フォント)切替: Block / Outline(中抜き輪郭) |
-| `s` | シンボル切替: `#` / `█` / `▓░` / `*.` / `+-`(すべて半角) |
+| `s` | シンボル切替: `#` / `█` / `▓░` / Dots(●ドットマトリクス風) |
 | `c` | 前景色切替(ANSI 8色 + Default) |
 | `b` | 背景色切替(ANSI 8色 + Default) |
 | `h` / `H` / `Esc` | ヘルプダイアログ表示/非表示 |
 | `o` / `O` | 設定ページ(modal)表示/非表示 |
 | `q` / `Q` / `Enter` | 終了 |
 
+> サイズは常に Auto(端末サイズに追従)。カスタムサイズは廃止済み。
+
 ### 設定ページ(`o` で開く、modal表示)
 
-- 全選択肢(Pattern / Symbol / Foreground / Background)がボックス描画文字(┌─┐│├┤└┘)の枠線付き modal 内に縦に並ぶ
+- 全選択肢(Date / Pattern / Symbol / Foreground / Background)がボックス描画文字(┌─┐│├┤└┘)の枠線付き modal 内に縦に並ぶ
+- modal は画面下部に寄せて表示(時計を見ながら設定できるよう、時計は上寄せに切り替え)
 - セクション(Pattern/Symbol/Foreground/Background)ごとに太字ヘッダ + `├──┤` 区切り線
 - 各選択肢行: `▶`(カーソル) / `●`(選択中) / `○`(未選択) のラジオドット風マーカ + ラベル + プレビュー
 - カーソル行は太字 `\x1b[1m` で強調。背景反転・下線は使わない(プレビュー内の `\x1b[0m` 後に再適用してハイライトを保持)
@@ -50,9 +53,9 @@ cargo build --release
 
 ## 設計
 
-- `src/digits.rs` — 5x5 ビットマップデジタルフォント。`Font` enum で複数パターン(Block/Outline/Segment/Dot/Slant)を切り替え(純粋)
-- `src/clock.rs` — 時刻フォーマット・コロン点滅・スケール計算・巨大描画・`Style`/`CharSet`/`Color`/`Theme`(純粋、単体テストあり)
-- `src/config.rs` — 設定ファイルの parse/format とデフォルト設定(純粋、単体テストあり)
+- `src/digits.rs` — デジタルフォント。`Font` enum で複数パターン(Block/Outline=5x5, Neo/Segment=7x7)を切り替え(純粋)
+- `src/clock.rs` — 時刻フォーマット・コロン点滅・スケール計算・`ScaleMode`(Auto/Manual)・`resolve_scale`・巨大描画・`Style`/`CharSet`/`Color`/`Theme`(純粋、単体テストあり)
+- `src/config.rs` — 設定ファイルの parse/format とデフォルト設定(scale_mode/scale 含む)(純粋、単体テストあり)
 - `src/main.rs` — crossterm によるフルスクリーンTUI(入力/リサイズ/再描画ループ・キー操作でスタイル/色をcycling)
 
 ### レスポンシブ描画の仕組み
@@ -60,6 +63,7 @@ cargo build --release
 - 1ピクセル = ターミナル2列 x 1行(セル縦横比≈2:1 を補正してほぼ正方形に)
 - "HH:MM" のピクセル幅 = 5グリフ*5 + 4ギャップ*1 = 29px => 58列(scale=1)
 - `compute_scale(cols, rows)` が端末サイズに収まる最大 scale を算出
+- `resolve_scale(ScaleMode, cols, rows, style)` が実際の描画 scale を決定: Auto のときは最大 scale、Manual(n) のときは n を [1, 最大scale] にクランプ。`Cmd+`/`Cmd-`(または `+`/`-`)で Auto→Manual に移行しつつ scale を増減
 - 変化(分更新/コロン点滅/リサイズ/スタイル・色変更)があったときだけ再描画
 - 文字の表示幅は `unicode-width` クレートで判定。半角文字(幅1)なら2個、全角文字(幅2)なら1個で1ピクセル(2列)を構成し、レイアウト崩れを防ぐ
 - 中央揃えの計算も `visible_width` (ANSIエスケープ除外 + unicode-width) を使用
