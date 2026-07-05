@@ -23,7 +23,7 @@ use crossterm::{
         MouseEventKind,
     },
     execute,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -369,11 +369,13 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
 
     // 背景色で画面全体を塗りつぶすため、テーマ設定後にクリア。
     // 多くの端末で ANSIクリアは現在の背景色で埋める。
+    // クリアも含めて1つのバッファにまとめて最後に1回だけ flush する —
+    // execute! で個別に flush すると、クリアと描画の間に空白フレームが
+    // 端末に表示されてチラつく原因になる。
     let prefix = clock::theme_prefix(key.theme);
-    stdout.write_all(prefix.as_bytes())?;
-    execute!(stdout, Clear(ClearType::All))?;
-
     let mut buf = String::new();
+    buf.push_str(&prefix);
+    buf.push_str("\x1b[2J");
     draw_chrome(&mut buf, key);
 
     if !date_lines.is_empty() && key.rows >= 12 {
