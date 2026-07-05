@@ -37,13 +37,14 @@ impl Font {
     }
 }
 
-/// グリフのパターン。5行、各行5文字。
+/// グリフのパターン(5x5フォントのみ)。7x7フォント(Neo/Segment)は
+/// `render_glyph` / `glyph_width` / `glyph_height` 経由で取得すること。
 pub fn glyph(font: Font, c: char) -> &'static [&'static str; 5] {
     match font {
         Font::Neo => glyph_block(c),
         Font::Block => glyph_block(c),
         Font::Outline => glyph_outline(c),
-        Font::Segment => glyph_segment(c),
+        Font::Segment => glyph_block(c), // 5x5 fallback; 本来は render_glyph を使用
         Font::Dot => glyph_dot(c),
         Font::Slant => glyph_slant(c),
     }
@@ -52,20 +53,21 @@ pub fn glyph(font: Font, c: char) -> &'static [&'static str; 5] {
 pub fn render_glyph(font: Font, c: char) -> &'static [&'static str] {
     match font {
         Font::Neo => glyph_neo(c),
+        Font::Segment => glyph_segment(c),
         _ => glyph(font, c),
     }
 }
 
 pub fn glyph_width(font: Font) -> usize {
     match font {
-        Font::Neo => 7,
+        Font::Neo | Font::Segment => 7,
         _ => GLYPH_W,
     }
 }
 
 pub fn glyph_height(font: Font) -> usize {
     match font {
-        Font::Neo => 7,
+        Font::Neo | Font::Segment => 7,
         _ => GLYPH_H,
     }
 }
@@ -177,25 +179,63 @@ fn glyph_outline(c: char) -> &'static [&'static str; 5] {
     }
 }
 
-/// 7セグメント風フォント。デジタル時計の液晶表示を模倣。
-/// 上下の横セグメントは全幅3px(中央寄せ)、中段の横セグメントは3px。
-/// 縦セグメントは両端の1px。
-fn glyph_segment(c: char) -> &'static [&'static str; 5] {
+/// 14セグメント風フォント(7x7)。7セグメントに斜めセグメントを加えた表示。
+/// 中段(g)が中央で分割(g1/g2)され、センターにギャップができるのが特徴。
+/// 横セグメントは5px(中央寄せ)、縦セグメントは両端2px幅。
+/// 中段のみ " ## ## " (2px + gap + 2px) で分割を表現。
+/// 全グリフで row0 と row6 に必ずピクセルを置き、高さを揃える。
+fn glyph_segment(c: char) -> &'static [&'static str; 7] {
     match c {
-        // セグメント配置: 上 / 右上・左上 / 中 / 右下・左下 / 下
-        '0' => &[" ### ", "#   #", "#   #", "#   #", " ### "],
-        '1' => &["    #", "    #", "    #", "    #", "    #"],
-        '2' => &[" ### ", "    #", " ### ", "#    ", " ### "],
-        '3' => &[" ### ", "    #", " ### ", "    #", " ### "],
-        '4' => &["     ", "#   #", " ### ", "    #", "     "],
-        '5' => &[" ### ", "#    ", " ### ", "    #", " ### "],
-        '6' => &[" ### ", "#    ", " ### ", "#   #", " ### "],
-        '7' => &[" ### ", "    #", "     ", "    #", "     "],
-        '8' => &[" ### ", "#   #", " ### ", "#   #", " ### "],
-        '9' => &[" ### ", "#   #", " ### ", "    #", " ### "],
-        ':' => &["     ", "  #  ", "     ", "  #  ", "     "],
-        ' ' => &["     ", "     ", "     ", "     ", "     "],
-        _ => &["     ", " ##  ", "#  # ", "     ", " #   "],
+        // 14セグメント配置(7x7):
+        //   row0: a (上)
+        //   row1: f(左上) + b(右上)
+        //   row2: f(左上) + b(右上)
+        //   row3: g1(中左) + g2(中右) — 中央ギャップ
+        //   row4: e(左下) + c(右下)
+        //   row5: e(左下) + c(右下)
+        //   row6: d (下)
+        '0' => &[
+            " ##### ", "##   ##", "##   ##", "       ", "##   ##", "##   ##", " ##### ",
+        ],
+        // 1: 右上(b)+右下(c)セグメント。高さ揃えのため上下端に右縦の先端を配置。
+        '1' => &[
+            "     ##", "     ##", "     ##", "       ", "     ##", "     ##", "     ##",
+        ],
+        '2' => &[
+            " ##### ", "     ##", "     ##", " ## ## ", "##     ", "##     ", " ##### ",
+        ],
+        '3' => &[
+            " ##### ", "     ##", "     ##", " ## ## ", "     ##", "     ##", " ##### ",
+        ],
+        // 4: 左上(f)+右上(b)+中(g1/g2)+右下(c)。高さ揃えのため下端に右縦の先端を配置。
+        '4' => &[
+            "##   ##", "##   ##", "##   ##", " ## ## ", "     ##", "     ##", "     ##",
+        ],
+        '5' => &[
+            " ##### ", "##     ", "##     ", " ## ## ", "     ##", "     ##", " ##### ",
+        ],
+        '6' => &[
+            " ##### ", "##     ", "##     ", " ## ## ", "##   ##", "##   ##", " ##### ",
+        ],
+        // 7: 上(a)+右上(b)+右下(c)。高さ揃えのため下端に右縦の先端を配置。
+        '7' => &[
+            " ##### ", "     ##", "     ##", "       ", "     ##", "     ##", "     ##",
+        ],
+        '8' => &[
+            " ##### ", "##   ##", "##   ##", " ## ## ", "##   ##", "##   ##", " ##### ",
+        ],
+        '9' => &[
+            " ##### ", "##   ##", "##   ##", " ## ## ", "     ##", "     ##", " ##### ",
+        ],
+        ':' => &[
+            "       ", "  ##   ", "  ##   ", "       ", "  ##   ", "  ##   ", "       ",
+        ],
+        ' ' => &[
+            "       ", "       ", "       ", "       ", "       ", "       ", "       ",
+        ],
+        _ => &[
+            "       ", " ####  ", "##  ## ", "   ##  ", "       ", "  ##   ", "       ",
+        ],
     }
 }
 
@@ -249,13 +289,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_fonts_are_5x5() {
-        for &font in Font::all() {
+    fn five_by_five_fonts_have_correct_dimensions() {
+        // Block / Outline は 5x5。Neo / Segment は 7x7(render_glyph 経由)。
+        for &font in &[Font::Block, Font::Outline] {
             for c in "0123456789:".chars() {
                 let g = glyph(font, c);
                 assert_eq!(g.len(), GLYPH_H, "font {font:?} glyph {c} row count");
                 for (i, row) in g.iter().enumerate() {
                     assert_eq!(row.len(), GLYPH_W, "font {font:?} glyph {c} row {i} width");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seven_by_seven_fonts_have_correct_dimensions() {
+        // Neo / Segment は 7x7(render_glyph 経由)。
+        for &font in &[Font::Neo, Font::Segment] {
+            for c in "0123456789:".chars() {
+                let g = render_glyph(font, c);
+                assert_eq!(g.len(), 7, "font {font:?} glyph {c} row count");
+                for (i, row) in g.iter().enumerate() {
+                    assert_eq!(row.len(), 7, "font {font:?} glyph {c} row {i} width");
                 }
             }
         }
@@ -293,26 +348,42 @@ mod tests {
     }
 
     #[test]
-    fn segment_font_uses_thin_segments() {
-        // Segment の 8 は上下中が " ### "(3px)、縦セグメントは両端
-        let g = glyph(Font::Segment, '8');
-        assert_eq!(g[0], " ### ");
-        assert_eq!(g[2], " ### ");
-        assert_eq!(g[4], " ### ");
-        assert_eq!(g[1], "#   #");
+    fn segment_font_uses_7x7_segments() {
+        // 14セグメント風: 上下は " ##### "(5px)、中段は " ## ## "(分割)
+        let g = render_glyph(Font::Segment, '8');
+        assert_eq!(g[0], " ##### ");
+        assert_eq!(g[3], " ## ## ");
+        assert_eq!(g[6], " ##### ");
+        assert_eq!(g[1], "##   ##");
     }
 
     #[test]
-    fn segment_font_one_is_visible_vertical_line() {
-        // 1 は空行を挟まず右端の連続縦線にして、巨大表示でも見失わないようにする
-        let g = glyph(Font::Segment, '1');
-        assert_eq!(g, &["    #", "    #", "    #", "    #", "    #"]);
+    fn segment_font_one_is_right_segment_pair() {
+        // 1 は右上(b)+右下(c)セグメント。高さ揃えのため上下端にも右縦先端。
+        let g = render_glyph(Font::Segment, '1');
+        assert_eq!(
+            g,
+            &["     ##", "     ##", "     ##", "       ", "     ##", "     ##", "     ##",]
+        );
     }
 
     #[test]
     fn segment_font_differs_from_block() {
-        // Segment と Block は 8 で異なる(Block は全幅、Segment は3pxセグメント)
-        assert_ne!(glyph(Font::Block, '8'), glyph(Font::Segment, '8'));
+        // Segment(7x7) と Block(5x5) は 8 で異なる
+        assert_ne!(
+            render_glyph(Font::Block, '8'),
+            render_glyph(Font::Segment, '8')
+        );
+    }
+
+    #[test]
+    fn segment_font_differs_from_neo() {
+        // Segment と Neo は別物(Neo は塗りつぶし、Segment はセグメント欠けあり)
+        let seg0 = render_glyph(Font::Segment, '0');
+        let neo0 = render_glyph(Font::Neo, '0');
+        // 0 の中段(row3)が Segment は空行、Neo は塗りつぶし
+        assert_eq!(seg0[3], "       ");
+        assert_ne!(seg0[3], neo0[3]);
     }
 
     #[test]

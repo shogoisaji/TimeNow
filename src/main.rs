@@ -10,6 +10,7 @@
 //! - `o` : 設定ページ(modal)表示/非表示(←→でカテゴリ、↑↓で即時変更)
 //! - `q` / `Q` / `Enter` : 終了
 
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -136,6 +137,11 @@ struct DrawKey {
 }
 
 fn main() -> io::Result<()> {
+    // --version / -v: ターミナルモードに入る前に標準出力へ表示して終了。
+    if env::args().any(|a| a == "--version" || a == "-v") {
+        println!("timenow {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let mut guard = TerminalGuard::enter()?;
     run(&mut guard.stdout)
 }
@@ -173,7 +179,10 @@ fn run(stdout: &mut io::Stdout) -> io::Result<()> {
 
         // 変化があったときだけ描画
         if last_draw != Some(key) {
-            draw(stdout, &key)?;
+            // 構造的変更(サイズ/スタイル/色/レイアウト)のときだけ全クリアが必要。
+            // コロン点滅・时分更新だけなら同じセルを上書きすれば済み、クリアしないことでチラつきを防ぐ。
+            let needs_clear = last_draw.is_none_or(|prev| structural_changed(&prev, &key));
+            draw(stdout, &key, needs_clear)?;
             last_draw = Some(key);
         }
 
@@ -191,8 +200,8 @@ fn run(stdout: &mut io::Stdout) -> io::Result<()> {
             }
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    // 設定ページ表示中: ↑↓は現在カテゴリ内で即時変更、←→はカテゴリ移動。
                     if settings.open {
+                        // 設定ページ表示中: ↑↓は現在カテゴリ内で即時変更、←→はカテゴリ移動。
                         let items =
                             clock::setting_items(state.style, state.theme, state.date_display);
                         match k.code {
@@ -303,7 +312,8 @@ fn run(stdout: &mut io::Stdout) -> io::Result<()> {
                             let (cols, rows) = terminal::size()?;
                             let vp_h = (rows as usize).saturating_sub(2).max(8);
                             let layout = clock::settings_layout(&items, settings.cursor, vp_h);
-                            let m_top = ((rows as usize).saturating_sub(layout.height)) / 2;
+                            // 描画側と同じ下部寄せの m_top を使う。
+                            let m_top = (rows as usize).saturating_sub(layout.height + 1);
                             let m_left = ((cols as usize).saturating_sub(layout.width)) / 2;
                             if let Some(idx) = clock::layout_item_at(
                                 &layout,
@@ -338,7 +348,23 @@ fn run(stdout: &mut io::Stdout) -> io::Result<()> {
     }
 }
 
-fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
+/// 構造的変更(再クリアが必要)かどうかを判定する。
+/// コロン点滅・時・分の変化だけなら同じセルを上書きすれば済むためクリア不要。
+/// それ以外(サイズ/スタイル/色/日付表示/ヘルプ/設定/月日)の変化は
+/// レイアウトが変わる可能性があるため全クリアが必要。
+fn structural_changed(prev: &DrawKey, curr: &DrawKey) -> bool {
+    prev.cols != curr.cols
+        || prev.rows != curr.rows
+        || prev.style != curr.style
+        || prev.theme != curr.theme
+        || prev.date_display != curr.date_display
+        || prev.show_help != curr.show_help
+        || prev.settings != curr.settings
+        || prev.month != curr.month
+        || prev.day != curr.day
+}
+
+fn draw(stdout: &mut io::Stdout, key: &DrawKey, needs_clear: bool) -> io::Result<()> {
     let text = clock::format_hhmm(key.hour, key.minute);
     let date_text = clock::format_date(key.month, key.day, key.date_display);
     let chrome_h = if key.rows >= 14 { 6 } else { 0 };
@@ -354,7 +380,7 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
         0
     };
     let available_rows = (key.rows as usize).saturating_sub(chrome_h + date_h).max(1);
-    let scale = clock::compute_scale_for_style(available_cols, available_rows, &key.style);
+    let scale = clock::resolve_scale(available_cols, available_rows, &key.style);
     let lines = clock::render(&text, key.colon_on, scale, &key.style);
 
     let rendered_h = lines.len();
@@ -364,18 +390,27 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
         .unwrap_or(0);
 
     let top_base = if chrome_h > 0 { 3 } else { 0 } + date_h;
-    let top = top_base + (available_rows.saturating_sub(rendered_h)) / 2;
+    // 設定ページ表示中は時計を上寄せして modal と重ならないようにする。
+    let top = if key.settings.open {
+        top_base + (available_rows.saturating_sub(rendered_h)) / 4
+    } else {
+        top_base + (available_rows.saturating_sub(rendered_h)) / 2
+    };
     let left = ((key.cols as usize).saturating_sub(rendered_w)) / 2;
 
     // 背景色で画面全体を塗りつぶすため、テーマ設定後にクリア。
     // 多くの端末で ANSIクリアは現在の背景色で埋める。
-    // クリアも含めて1つのバッファにまとめて最後に1回だけ flush する —
-    // execute! で個別に flush すると、クリアと描画の間に空白フレームが
-    // 端末に表示されてチラつく原因になる。
+    // ただし毎フレームクリアするとコロン点滇のたびに空白フレームが見えてチラつくため、
+    // 構造的変更(サイズ/スタイル/色/レイアウト)のときだけクリアする。
+    // さらに synchronized output(\x1b[?2028h / \x1b[?2029l)で端末にアトミック更新を指示し、
+    // 部分描画のチラつきを防ぐ。
     let prefix = clock::theme_prefix(key.theme);
     let mut buf = String::new();
+    buf.push_str("\x1b[?2028h"); // Begin synchronized update
     buf.push_str(&prefix);
-    buf.push_str("\x1b[2J");
+    if needs_clear {
+        buf.push_str("\x1b[2J");
+    }
     draw_chrome(&mut buf, key);
 
     if !date_lines.is_empty() && key.rows >= 12 {
@@ -396,7 +431,7 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
 
     if key.rows >= 12 && key.cols >= 64 {
         let shadow_style = clock::Style {
-            chars: clock::CharSet {
+            chars: clock::CharSet::Fill {
                 on: '░', off: ' '
             },
             ..key.style
@@ -438,7 +473,8 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
         }
     }
 
-    // 設定ページを modal としてオーバーレイ(画面中央、枠線付き)
+    // 設定ページを modal として下部にオーバーレイ(枠線付き)。
+    // 時計を見ながら設定できるよう、画面中央ではなく下部に寄せる。
     if key.settings.open {
         let items = clock::setting_items(key.style, key.theme, key.date_display);
         let vp_h = (key.rows as usize).saturating_sub(2).max(8);
@@ -449,7 +485,8 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
             .map(|l| clock::visible_width_pub(l))
             .max()
             .unwrap_or(0);
-        let m_top = ((key.rows as usize).saturating_sub(m_h)) / 2;
+        // 下部寄せ: 画面下端から1行余白を空けて配置。
+        let m_top = (key.rows as usize).saturating_sub(m_h + 1);
         let m_left = ((key.cols as usize).saturating_sub(m_w)) / 2;
         // modal はデフォルト色で描画して視認性を確保
         buf.push_str("\x1b[39;49m");
@@ -459,8 +496,9 @@ fn draw(stdout: &mut io::Stdout, key: &DrawKey) -> io::Result<()> {
         }
     }
 
-    // リセット(属性を元に戻す)
+    // リセット(属性を元に戻す) + synchronized update 終了
     buf.push_str("\x1b[0m");
+    buf.push_str("\x1b[?2029l"); // End synchronized update
     stdout.write_all(buf.as_bytes())?;
     stdout.flush()?;
     Ok(())
@@ -582,7 +620,7 @@ fn draw_chrome(buf: &mut String, key: &DrawKey) {
         write_line(buf, cols, 2, 4, "\x1b[2m", &rail);
     }
 
-    let footer = " p pattern  s symbol  c fg  b bg  d date  o settings  h help  q quit ";
+    let footer = " p pattern  s symbol  c fg  b bg  d date  +/- size  o settings  h help  q quit ";
     let footer_w = clock::visible_width_pub(footer);
     let footer_col = (cols.saturating_sub(footer_w)) / 2;
     write_line(buf, cols, key.rows as usize, footer_col, "\x1b[2m", footer);
@@ -673,5 +711,51 @@ mod tests {
         let mut buf = String::new();
         draw_chrome(&mut buf, &key);
         assert!(buf.is_empty(), "chrome must not draw on tiny terminals");
+    }
+
+    #[test]
+    fn structural_changed_false_for_colon_blink_only() {
+        let prev = key_for(12, 30, 7, 5, 80, 24);
+        let mut curr = prev;
+        curr.colon_on = !prev.colon_on;
+        assert!(!structural_changed(&prev, &curr));
+    }
+
+    #[test]
+    fn structural_changed_false_for_minute_update_only() {
+        let prev = key_for(12, 30, 7, 5, 80, 24);
+        let mut curr = prev;
+        curr.minute = 31;
+        assert!(!structural_changed(&prev, &curr));
+    }
+
+    #[test]
+    fn structural_changed_true_for_resize() {
+        let prev = key_for(12, 30, 7, 5, 80, 24);
+        let mut curr = prev;
+        curr.cols = 100;
+        assert!(structural_changed(&prev, &curr));
+    }
+
+    #[test]
+    fn structural_changed_true_for_style_or_theme() {
+        let prev = key_for(12, 30, 7, 5, 80, 24);
+        let mut curr = prev;
+        curr.style.font = clock::Style::DEFAULT.font.next();
+        assert!(structural_changed(&prev, &curr));
+        let mut curr2 = prev;
+        curr2.theme.fg = clock::Color::Red;
+        assert!(structural_changed(&prev, &curr2));
+    }
+
+    #[test]
+    fn structural_changed_true_for_help_or_settings_toggle() {
+        let prev = key_for(12, 30, 7, 5, 80, 24);
+        let mut curr = prev;
+        curr.show_help = true;
+        assert!(structural_changed(&prev, &curr));
+        let mut curr2 = prev;
+        curr2.settings.open = true;
+        assert!(structural_changed(&prev, &curr2));
     }
 }

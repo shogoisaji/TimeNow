@@ -59,7 +59,7 @@ pub fn format_config(config: AppConfig) -> String {
         charset_id(config.style.chars),
         color_id(config.theme.fg),
         color_id(config.theme.bg),
-        date_id(config.date_display)
+        date_id(config.date_display),
     )
 }
 
@@ -109,40 +109,63 @@ fn font_from_id(id: &str) -> Option<Font> {
 }
 
 fn charset_id(chars: crate::clock::CharSet) -> &'static str {
-    if chars == (crate::clock::CharSet { on: '#', off: ' ' }) {
-        "Hash"
-    } else if chars
-        == (crate::clock::CharSet {
+    use crate::clock::CharSet;
+    match chars {
+        CharSet::Fill { on: '#', off: ' ' } => "Hash",
+        CharSet::Fill {
             on: '█', off: ' '
-        })
-    {
-        "Block"
-    } else if chars
-        == (crate::clock::CharSet {
+        } => "Block",
+        CharSet::Fill {
             on: '▓', off: '░'
-        })
-    {
-        "Shade"
-    } else if chars == (crate::clock::CharSet { on: '*', off: '.' }) {
-        "StarDot"
-    } else if chars == (crate::clock::CharSet { on: '+', off: '-' }) {
-        "PlusMinus"
-    } else {
-        "Block"
+        } => "Shade",
+        CharSet::Fill {
+            on: '▒', off: ' '
+        } => "Shade2",
+        CharSet::Fill {
+            on: '█', off: '▄'
+        } => "FullLower",
+        CharSet::Fill {
+            on: '█', off: '▀'
+        } => "FullUpper",
+        CharSet::Fill {
+            on: '█', off: '▒'
+        } => "FullMid",
+        CharSet::Fill {
+            on: '█', off: '░'
+        } => "FullLight",
+        CharSet::Dots => "Dots",
+        _ => "Block",
     }
 }
 
 fn charset_from_id(id: &str) -> Option<crate::clock::CharSet> {
+    use crate::clock::CharSet;
     match id {
-        "Hash" => Some(crate::clock::CharSet { on: '#', off: ' ' }),
-        "Block" => Some(crate::clock::CharSet {
+        "Hash" => Some(CharSet::Fill { on: '#', off: ' ' }),
+        "Block" => Some(CharSet::Fill {
             on: '█', off: ' '
         }),
-        "Shade" => Some(crate::clock::CharSet {
+        "Shade" => Some(CharSet::Fill {
             on: '▓', off: '░'
         }),
-        "StarDot" => Some(crate::clock::CharSet { on: '*', off: '.' }),
-        "PlusMinus" => Some(crate::clock::CharSet { on: '+', off: '-' }),
+        "Shade2" => Some(CharSet::Fill {
+            on: '▒', off: ' '
+        }),
+        "FullLower" => Some(CharSet::Fill {
+            on: '█', off: '▄'
+        }),
+        "FullUpper" => Some(CharSet::Fill {
+            on: '█', off: '▀'
+        }),
+        "FullMid" => Some(CharSet::Fill {
+            on: '█', off: '▒'
+        }),
+        "FullLight" => Some(CharSet::Fill {
+            on: '█', off: '░'
+        }),
+        "Dots" => Some(CharSet::Dots),
+        // 廃止された旧IDはデフォルトへフォールバック
+        "StarDot" | "PlusMinus" | "Half" | "Square" | "Outline" => None,
         _ => None,
     }
 }
@@ -200,7 +223,7 @@ mod tests {
         AppConfig {
             style: Style {
                 font: Font::Segment,
-                chars: CharSet { on: '+', off: '-' },
+                chars: CharSet::Dots,
             },
             theme: Theme {
                 fg: Color::Yellow,
@@ -238,7 +261,7 @@ mod tests {
     fn format_config_uses_stable_json_shape() {
         assert_eq!(
             format_config(sample_config()),
-            "{\n  \"font\": \"Segment\",\n  \"symbol\": \"PlusMinus\",\n  \"foreground\": \"Yellow\",\n  \"background\": \"Blue\",\n  \"date\": \"None\"\n}\n"
+            "{\n  \"font\": \"Segment\",\n  \"symbol\": \"Dots\",\n  \"foreground\": \"Yellow\",\n  \"background\": \"Blue\",\n  \"date\": \"None\"\n}\n"
         );
     }
 
@@ -277,28 +300,71 @@ mod tests {
 
     #[test]
     fn parse_config_accepts_all_supported_symbols() {
-        let cases = [
-            ("Hash", CharSet { on: '#', off: ' ' }),
+        let cases: [(&str, CharSet); 9] = [
+            ("Hash", CharSet::Fill { on: '#', off: ' ' }),
             (
                 "Block",
-                CharSet {
+                CharSet::Fill {
                     on: '█', off: ' '
                 },
             ),
             (
                 "Shade",
-                CharSet {
+                CharSet::Fill {
                     on: '▓', off: '░'
                 },
             ),
-            ("StarDot", CharSet { on: '*', off: '.' }),
-            ("PlusMinus", CharSet { on: '+', off: '-' }),
+            (
+                "Shade2",
+                CharSet::Fill {
+                    on: '▒', off: ' '
+                },
+            ),
+            (
+                "FullLower",
+                CharSet::Fill {
+                    on: '█', off: '▄'
+                },
+            ),
+            (
+                "FullUpper",
+                CharSet::Fill {
+                    on: '█', off: '▀'
+                },
+            ),
+            (
+                "FullMid",
+                CharSet::Fill {
+                    on: '█', off: '▒'
+                },
+            ),
+            (
+                "FullLight",
+                CharSet::Fill {
+                    on: '█', off: '░'
+                },
+            ),
+            ("Dots", CharSet::Dots),
         ];
 
         for (id, chars) in cases {
             let text = format!("{{\"symbol\": \"{id}\"}}");
 
             assert_eq!(parse_config(&text, AppConfig::default()).style.chars, chars);
+        }
+    }
+
+    #[test]
+    fn parse_config_retired_symbol_ids_fall_back_to_default() {
+        // 廃止された旧IDはデフォルトへフォールバック
+        let default = AppConfig::default();
+        for id in ["StarDot", "PlusMinus", "Half", "Square", "Outline"] {
+            assert_eq!(
+                parse_config(&format!("{{\"symbol\": \"{id}\"}}"), default)
+                    .style
+                    .chars,
+                default.style.chars
+            );
         }
     }
 
@@ -316,7 +382,7 @@ mod tests {
         let config = AppConfig {
             style: Style {
                 font: Font::Dot,
-                chars: CharSet { on: 'x', off: 'o' },
+                chars: CharSet::Fill { on: 'x', off: 'o' },
             },
             theme: Theme::default(),
             date_display: DateDisplay::Numeric,
